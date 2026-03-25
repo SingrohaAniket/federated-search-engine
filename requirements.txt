@@ -1,0 +1,4 @@
+# Step 1: GitHub Connector only
+requests==2.31.0
+pydantic==2.5.2
+python-dotenv==1.0.0
