@@ -1,4 +1,7 @@
-# Step 1: GitHub Connector only
+# Step 1: GitHub Connector
 requests==2.31.0
 pydantic==2.5.2
 python-dotenv==1.0.0
+
+# Step 2: Kafka ingestion bus
+kafka-python==2.0.2

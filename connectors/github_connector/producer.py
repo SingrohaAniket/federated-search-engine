@@ -1,36 +1,54 @@
 """
-Simple local producer that saves raw documents to a JSON file.
-This replaces Kafka for Step 1 — we just want to see the data.
-Kafka will be added in a later step.
+Kafka producer for publishing raw GitHub documents to the 'raw-documents' topic.
+Step 2: This replaces LocalProducer from Step 1.
 """
 
 import json
-import os
 import logging
-from datetime import datetime
 from typing import List, Dict
 
+from kafka import KafkaProducer
+from kafka.errors import KafkaError
+
+from common.config import config
 from common.schemas import RawDocument, SourceType, DocType
 
 logger = logging.getLogger(__name__)
 
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "raw")
 
+class GitHubKafkaProducer:
+    """Publishes raw GitHub data to Kafka topic 'raw-documents'."""
 
-class LocalProducer:
-    """Saves raw GitHub data to local JSON files instead of Kafka."""
+    def __init__(self):
+        self.producer = KafkaProducer(
+            bootstrap_servers=config.KAFKA_BOOTSTRAP_SERVERS,
+            # Serialize values to JSON bytes
+            value_serializer=lambda v: json.dumps(v, default=str).encode("utf-8"),
+            # Key is a string like "github:issue:12345" — used by Kafka for partitioning
+            key_serializer=lambda k: k.encode("utf-8"),
+            # Wait for all replicas to acknowledge (safe delivery)
+            acks="all",
+            retries=3,
+        )
+        self.topic = config.KAFKA_RAW_TOPIC
+        logger.info(f"Kafka producer connected to {config.KAFKA_BOOTSTRAP_SERVERS}")
+        logger.info(f"Publishing to topic: {self.topic}")
 
-    def __init__(self, output_dir: str = OUTPUT_DIR):
-        self.output_dir = output_dir
-        os.makedirs(self.output_dir, exist_ok=True)
-        self.documents: List[Dict] = []
+    def _publish(self, raw_doc: RawDocument):
+        """Publish a single raw document to Kafka."""
+        # Key format: "github:issue:12345"
+        # Kafka uses this key to decide which partition the message goes to.
+        # Same key = always same partition = order guaranteed per document.
+        key = f"{raw_doc.source.value}:{raw_doc.doc_type.value}:{raw_doc.raw_id}"
 
-    def _save(self, raw_doc: RawDocument):
-        """Collect a raw document."""
-        self.documents.append(raw_doc.model_dump(mode="json"))
+        self.producer.send(
+            self.topic,
+            key=key,
+            value=raw_doc.model_dump(mode="json"),
+        )
 
     def publish_issues(self, issues: List[Dict]):
-        """Collect raw GitHub issues."""
+        """Publish raw GitHub issues to Kafka."""
         for issue in issues:
             raw_doc = RawDocument(
                 source=SourceType.GITHUB,
@@ -38,11 +56,14 @@ class LocalProducer:
                 raw_id=str(issue["id"]),
                 data=issue,
             )
-            self._save(raw_doc)
-        logger.info(f"Collected {len(issues)} issues")
+            self._publish(raw_doc)
+
+        # flush() blocks until all pending messages are delivered
+        self.producer.flush()
+        logger.info(f"Published {len(issues)} issues to Kafka topic '{self.topic}'")
 
     def publish_pull_requests(self, prs: List[Dict]):
-        """Collect raw GitHub pull requests."""
+        """Publish raw GitHub pull requests to Kafka."""
         for pr in prs:
             raw_doc = RawDocument(
                 source=SourceType.GITHUB,
@@ -50,11 +71,13 @@ class LocalProducer:
                 raw_id=str(pr["id"]),
                 data=pr,
             )
-            self._save(raw_doc)
-        logger.info(f"Collected {len(prs)} PRs")
+            self._publish(raw_doc)
+
+        self.producer.flush()
+        logger.info(f"Published {len(prs)} PRs to Kafka topic '{self.topic}'")
 
     def publish_commits(self, commits: List[Dict]):
-        """Collect raw GitHub commits."""
+        """Publish raw GitHub commits to Kafka."""
         for commit in commits:
             raw_doc = RawDocument(
                 source=SourceType.GITHUB,
@@ -62,21 +85,12 @@ class LocalProducer:
                 raw_id=commit["sha"],
                 data=commit,
             )
-            self._save(raw_doc)
-        logger.info(f"Collected {len(commits)} commits")
+            self._publish(raw_doc)
 
-    def flush(self):
-        """Write all collected documents to a JSON file."""
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        filepath = os.path.join(self.output_dir, f"github_raw_{timestamp}.json")
-
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(self.documents, f, indent=2, default=str)
-
-        logger.info(f"Saved {len(self.documents)} documents to {filepath}")
-        return filepath
+        self.producer.flush()
+        logger.info(f"Published {len(commits)} commits to Kafka topic '{self.topic}'")
 
     def close(self):
-        """Flush remaining documents."""
-        if self.documents:
-            return self.flush()
+        """Cleanly close the Kafka connection."""
+        self.producer.close()
+        logger.info("Kafka producer closed")
